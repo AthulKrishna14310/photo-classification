@@ -2,8 +2,10 @@ package com.integrals.photoclassification;
 
 
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.ContextWrapper;
+import android.content.res.AssetFileDescriptor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -20,6 +22,7 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
 
@@ -27,95 +30,166 @@ import com.google.android.gms.vision.Frame;
 import com.google.android.gms.vision.face.Face;
 import com.google.android.gms.vision.face.FaceDetector;
 
+import org.tensorflow.lite.DataType;
+import org.tensorflow.lite.Interpreter;
+import org.tensorflow.lite.support.common.TensorOperator;
+import org.tensorflow.lite.support.common.ops.NormalizeOp;
+import org.tensorflow.lite.support.image.ImageProcessor;
+import org.tensorflow.lite.support.image.TensorImage;
+import org.tensorflow.lite.support.image.ops.ResizeOp;
+import org.tensorflow.lite.support.image.ops.ResizeWithCropOrPadOp;
+
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
-public class MainActivity extends AppCompatActivity implements View.OnClickListener {
+public class MainActivity extends AppCompatActivity  {
 
+    protected Interpreter tflite;
     private static final String TAG = "MAIN";
-    ImageView imageView, imgTakePicture;
-    Button btnProcessNext, btnTakePicture;
-    TextView txtSampleDesc, txtTakenPicDesc;
     private FaceDetector detector;
-    Bitmap editedBitmap;
-    int currentIndex = 0;
-    int[] imageArray;
-    private Uri imageUri;
-    private static final int REQUEST_WRITE_PERMISSION = 200;
-    private static final int CAMERA_REQUEST = 101;
-
-    private static final String SAVED_INSTANCE_URI = "uri";
-    private static final String SAVED_INSTANCE_BITMAP = "bitmap";
-
+    private Bitmap editedBitmap;
+    private  int imageSizeX;
+    private  int imageSizeY;
+    private static final float IMAGE_MEAN = 0.0f;
+    private static final float IMAGE_STD = 1.0f;
+    private int[] imageArray;
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        try{
+            tflite=new Interpreter(loadmodelfile(this));
+        }catch (Exception e) {
+            e.printStackTrace();
+        }
+        imageArray = new int[]{R.drawable.face1, R.drawable.sample_8};
 
-        imageArray = new int[]{R.drawable.sample_1, R.drawable.sample_2, R.drawable.sample_3};
         detector = new FaceDetector.Builder(getApplicationContext())
                 .setTrackingEnabled(false)
                 .setLandmarkType(FaceDetector.ALL_CLASSIFICATIONS)
                 .setMode(FaceDetector.ACCURATE_MODE)
                 .setClassificationType(FaceDetector.ALL_CLASSIFICATIONS)
                 .build();
-
-        initViews();
-
+        findViewById(R.id.btnProcessNext).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                Bitmap image=decodeBitmapImage(imageArray[1]);
+                Bitmap face=decodeBitmapImage(imageArray[0]);
+                Toast.makeText(getApplicationContext(),"Face is contained in image = "+
+                        isFacePresent(face,image)+"",Toast.LENGTH_SHORT).show();
+            }
+        });
     }
-
-    private void initViews() {
-        imageView = (ImageView) findViewById(R.id.imageView);
-        btnProcessNext = (Button) findViewById(R.id.btnProcessNext);
-        btnTakePicture = (Button) findViewById(R.id.btnTakePicture);
-        txtSampleDesc = (TextView) findViewById(R.id.txtSampleDescription);
-        txtTakenPicDesc = (TextView) findViewById(R.id.txtTakePicture);
-
-        processImage(imageArray[currentIndex]);
-        currentIndex++;
-
-        btnProcessNext.setOnClickListener(this);
-
-    }
-
-    @Override
-    public void onClick(View v) {
-        switch (v.getId()) {
-            case R.id.btnProcessNext:
-                imageView.setImageResource(imageArray[currentIndex]);
-                processImage(imageArray[currentIndex]);
-                if (currentIndex == imageArray.length - 1)
-                    currentIndex = 0;
-                else
-                    currentIndex++;
-
-                break;
-        }
-    }
-
-
-
-
 
 
 
     @Override
-    protected void onSaveInstanceState(Bundle outState) {
-        if (imageUri != null) {
-            outState.putParcelable(SAVED_INSTANCE_BITMAP, editedBitmap);
-            outState.putString(SAVED_INSTANCE_URI, imageUri.toString());
-        }
-        super.onSaveInstanceState(outState);
+    protected void onDestroy() {
+        super.onDestroy();
+        detector.release();
     }
 
 
-    private void processImage(int image) {
+    private boolean isFacePresent(Bitmap faceBitmap , Bitmap imageBitmap){
+        boolean result=false;
 
-        Bitmap bitmap = decodeBitmapImage(image);
+        float[][] embedding1=new float[1][128];
+        float[][] embedding2=new float[1][128];
+
+        embedding1=get_embaddings(faceBitmap);
+        SparseArray<Face> faces=processImage(imageBitmap);
+        if(faces!=null) {
+            for (int index = 0; index < faces.size(); ++index) {
+
+                Face face = faces.valueAt(index);
+                int newWidth = (int) (face.getWidth());
+                int newHeight = (int) (face.getHeight());
+
+                Bitmap resizedBitmap = Bitmap.createBitmap(
+                        imageBitmap,
+                        (int) (face.getPosition().x),
+                        (int) (face.getPosition().y),
+                        newWidth,
+                        newHeight);
+
+                embedding2 = get_embaddings(resizedBitmap);
+                if (isFacesEqual(embedding1, embedding2) == true) {
+                    result = true;
+                }
+
+            }
+        }else{
+            Toast.makeText(getApplicationContext(),"Faces is null ",Toast.LENGTH_SHORT).show();
+        }
+
+        return result;
+    }
+
+    private MappedByteBuffer loadmodelfile(Activity activity) throws IOException {
+        AssetFileDescriptor fileDescriptor=activity.getAssets().openFd("Qfacenet.tflite");
+        FileInputStream inputStream=new FileInputStream(fileDescriptor.getFileDescriptor());
+        FileChannel fileChannel=inputStream.getChannel();
+        long startoffset = fileDescriptor.getStartOffset();
+        long declaredLength=fileDescriptor.getDeclaredLength();
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY,startoffset,declaredLength);
+    }
+
+    public float[][] get_embaddings(Bitmap bitmap){
+        TensorImage inputImageBuffer;
+        float[][] embedding = new float[1][128];
+        int imageTensorIndex = 0;
+        int[] imageShape = tflite.getInputTensor(imageTensorIndex).shape();
+        imageSizeY = imageShape[1];
+        imageSizeX = imageShape[2];
+        DataType imageDataType = tflite.getInputTensor(imageTensorIndex).dataType();
+        inputImageBuffer = new TensorImage(imageDataType);
+        inputImageBuffer = loadImage(bitmap,inputImageBuffer);
+        tflite.run(inputImageBuffer.getBuffer(),embedding);
+        return embedding;
+    }
+
+    private TensorImage loadImage(final Bitmap bitmap, TensorImage inputImageBuffer ) {
+        inputImageBuffer.load(bitmap);
+        int cropSize = Math.min(bitmap.getWidth(), bitmap.getHeight());
+        ImageProcessor imageProcessor =
+                new ImageProcessor.Builder()
+                        .add(new ResizeWithCropOrPadOp(cropSize, cropSize))
+                        .add(new ResizeOp(imageSizeX, imageSizeY, ResizeOp.ResizeMethod.NEAREST_NEIGHBOR))
+                        .add(getPreprocessNormalizeOp())
+                        .build();
+        return imageProcessor.process(inputImageBuffer);
+    }
+
+    private TensorOperator getPreprocessNormalizeOp() {
+        return new NormalizeOp(IMAGE_MEAN, IMAGE_STD);
+    }
+
+    private boolean isFacesEqual(float[][] embedding1,float[][] embedding2){
+        boolean result=false;
+        double distance=calculate_distance(embedding1,embedding2);
+        if(distance<6)
+            result=true;
+        else
+            result=false;
+        return result;
+    }
+
+    private double calculate_distance(float[][] ori_embedding, float[][] test_embedding) {
+        double sum =0.0;
+        for(int i=0;i<128;i++){
+            sum=sum+Math.pow((ori_embedding[0][i]-test_embedding[0][i]),2.0);
+        }
+        return Math.sqrt(sum);
+    }
+
+    private SparseArray<Face> processImage(Bitmap bitmap) {
         if (detector.isOperational() && bitmap != null) {
             editedBitmap = Bitmap.createBitmap(bitmap.getWidth(), bitmap
                     .getHeight(), bitmap.getConfig());
@@ -130,8 +204,6 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             canvas.drawBitmap(bitmap, 0, 0, paint);
             Frame frame = new Frame.Builder().setBitmap(editedBitmap).build();
             SparseArray<Face> faces = detector.detect(frame);
-            txtSampleDesc.setText(null);
-
             runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
@@ -141,36 +213,22 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                         canvas.drawRect(face.getPosition().x,
                                 face.getPosition().y,
                                 face.getPosition().x + face.getWidth(),
-                                    face.getPosition().y + face.getHeight(),
-                                    paint);
-                           
-                            int newWidth = (int)(face.getWidth());
-                            int newHeight = (int)face.getHeight();
-                            
-                            Bitmap resizedBitmap = Bitmap.createBitmap(bitmap,
-                                    (int) (face.getPosition().x),
-                                    (int)(face.getPosition().y),
-                                    newWidth, newHeight);
-                            Log.d(TAG,"Image Saved in "+ storeImage(resizedBitmap));
+                                face.getPosition().y + face.getHeight(),
+                                paint);
                     }
-              }
-
-
-
-
+                }
             });
 
             if (faces.size() == 0) {
-                txtSampleDesc.setText("Scan Failed: Found nothing to scan");
-            } else {
-                imageView.setImageBitmap(editedBitmap);
-                txtSampleDesc.setText(txtSampleDesc.getText() + "No of Faces Detected: " + " " + String.valueOf(faces.size()));
+                return null;
             }
-        } else {
-            txtSampleDesc.setText("Could not set up the detector!");
-        }
-    }
 
+            return faces;
+        }
+
+        return null;
+
+    }
     private Bitmap decodeBitmapImage(int image) {
         int targetW = 300;
         int targetH = 300;
@@ -191,30 +249,4 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 bmOptions);
     }
 
-    
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        detector.release();
-    }
-
-    private String storeImage(Bitmap bitmapImage){
-        File directory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
-        File myPath=new File(directory,System.currentTimeMillis()+"__.jpg");
-        FileOutputStream fos = null;
-        try {
-            fos = new FileOutputStream(myPath);
-            bitmapImage.compress(Bitmap.CompressFormat.PNG, 80, fos);
-        } catch (Exception e) {
-            e.printStackTrace();
-        } finally {
-            try {
-                fos.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-        return directory.getAbsolutePath();
-
-    }
 }
