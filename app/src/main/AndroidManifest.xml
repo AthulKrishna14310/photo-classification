@@ -4,9 +4,10 @@
 
     <uses-feature
         android:name="android.hardware.camera"
-        android:required="true"/>
-    <uses-permission
-        android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+        android:required="true" />
+
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
 
     <application
         android:allowBackup="true"
@@ -15,10 +16,11 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.PhotoClassification">
+        <activity android:name=".PeopleDisplay"></activity>
 
         <meta-data
             android:name="com.google.android.gms.vision.DEPENDENCIES"
-            android:value="face"/>
+            android:value="face" />
 
         <activity android:name=".MainActivity">
             <intent-filter>
